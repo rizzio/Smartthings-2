@@ -1,0 +1,616 @@
+/**
+ *  MyWinkDevices (Connect)
+ *
+ *  Copyright 2014 Terry Honn
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License. You may obtain a copy of the License at:
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
+ *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+ *  for the specific language governing permissions and limitations under the License.
+ *
+ */
+ 
+
+import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
+ 
+ 
+definition(
+    name: "MyWinkDevices (Connect)",
+    namespace: "TLH",
+    author: "Terry Honn",
+    description: "MyWinkDevices (Connect)",
+    category: "My Apps",
+    iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
+    iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png",
+    iconX3Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png")
+
+mappings {
+	path("/receivedToken") 			{ action:[ POST: "receivedToken", 				GET: "receivedToken"] }
+	path("/receiveToken") 			{ action:[ POST: "receiveToken", 				GET: "receiveToken"] }
+ 	path("/light_bulbCallback")		{ action:[ POST: "light_bulbEventHandler", 		GET: "subscriberIdentifyVerification"]}
+}
+
+preferences {
+	page(name: "loginToQuirky", title: "Quirky",install: true, uninstall: true)
+	page(name: "listDevices", title: "Devices", content: "listDevices", install: true, uninstall:true)
+}
+// Wink API
+private apiUrl() 		{ "https://winkapi.quirky.com/" }
+private getVendorName() 	{ "Quirky Wink" }
+private getVendorAuthPath()	{ "https://winkapi.quirky.com/oauth2/authorize?" }
+private getVendorTokenPath(){ "https://winkapi.quirky.com/oauth2/token?" }
+private getVendorIcon()		{ "https://s3.amazonaws.com/smartthings-device-icons/custom/quirky/quirky-device@2x.png" }
+private getClientId() 		{ appSettings.clientId }
+private getClientSecret() 	{ appSettings.clientSecret }
+//private getServerUrl() 		{ appSettings.serverUrl }
+private getUserID() 		{ appSettings.userID }
+private getUserPass() 		{ appSettings.userPass }
+private getServerUrl() 		{ "https://graph.api.smartthings.com" }
+
+def installed() {
+	log.debug "Installed with settings: ${settings}, sending to initialize"
+	initialize()
+    //deleteChildDevice("0c88b206-a4ab-4961-ab4d-2f9d44a55770")
+}
+
+def updated() {
+	log.debug "Updated with settings: ${settings}"
+	unsubscribe()
+	initialize()
+    if (state.devices) {
+    log.debug "in updated,state devices: ${state.devices}"
+    }
+}
+
+def initialize() {
+   log.debug "in initialize, settings: ${settings}"
+   if (!state.access_token) { 
+   login()
+   }
+   login()
+   //getDeviceList()
+   settings.devices.each {
+		def deviceId = settings.devices
+		state.deviceDataArr.each {
+			if ( it.id == deviceId ) {
+            log.debug "got ${it.name} which is ${it.id}"
+				switch(it.type) {
+					case "light_bulb":
+						//log.debug "we have a lightbulbhere"
+						//createChildDevice(it.data) //has sub-devices, so we call out to create kids
+                        createChildDevice("Wink Lightbulb2", it.id, it.name, it.label)
+						//createWinkSubscription( it.subsPath, it.subsSuff )
+						break
+   
+       }
+     }
+     }
+     }
+    // Delete any that are no longer in settings
+	def delete = getChildDevices().findAll { !settings.devices?.contains(it.deviceNetworkId) }
+    log.debug "deleting ${delete}"
+    delete.each() {
+        uninstallChildDevice(it)
+		deleteChildDevice(it.deviceNetworkId)
+    } 
+}
+
+private removeChildDevices(delete)
+{
+	log.debug "In removeChildDevices"
+	log.debug "deleting ${delete.size()} devices"
+
+	delete.each {
+		deleteChildDevice(it.deviceNetworkId)
+	}
+}
+
+def uninstallChildDevice(childDevice) 
+{
+	log.debug "in uninstallChildDevice"
+    
+    // Remove the childs subscription
+    def deviceData = state.deviceDataArr.findAll { it.id == childDevice.device.deviceNetworkId } 	
+    deviceData.each() {
+        def path = it.subsPath
+        apiGet(it.subsPath) { response ->
+			response.data.data.each {
+				if ( it.subscription_id ) {
+					deleteWinkSubscription(path + "/", it.subscription_id)
+				}
+			}
+		}    
+    }
+
+    //now remove the child from settings. Unselects from list of devices, not delete
+    log.debug "Settings size = ${settings['devices']}"
+    
+    if (!settings['devices']) //empty list, bail
+    	return
+    
+    def newDeviceList = settings['devices'] - childDevice.device.deviceNetworkId
+    app.updateSetting("devices", newDeviceList)
+}
+
+
+def createWinkSubscription(path, suffix)
+{
+	log.debug "In createWinkSubscription"
+	def callbackUrl = buildCallbackUrl(suffix)
+	httpPostJson([
+		uri : apiUrl(),
+		path: path,
+		body: ['callback': callbackUrl],
+		headers : ['Authorization' : 'Bearer ' + state.vendorAccessToken]
+	],)
+	{ 	response ->
+		log.debug "Created subscription ID ${response.data.data.subscription_id}"
+	}
+}
+
+def subscriberIdentifyVerification()
+{
+	log.debug "In subscriberIdentifyVerification"
+	def challengeToken = params.hub.challenge
+	render contentType: 'text/plain', data: challengeToken
+}
+
+def removeWinkSubscriptions()
+{
+	log.debug "In removeWinkSubscriptions"
+	state.deviceDataArr.each() {
+		if (it.subsPath) {
+			def path = it.subsPath
+			apiGet(it.subsPath) { response ->
+				response.data.data.each {
+					if ( it.subscription_id ) {
+                    	log.debug "Deleting Subscription: ${path}" + "/" + "${it.subscription_id}"
+						deleteWinkSubscription(path + "/", it.subscription_id)
+					}
+				}
+			}
+		}
+	}
+}
+
+def buildCallbackUrl(suffix)
+{
+	log.debug "In buildCallbackUrl"
+	def serverUrl = getServerUrl()
+   if (!state.access_token) { 
+      login()
+   }
+	log.debug "callbackurl:" + serverUrl + "/api/token/${state.access_token}/smartapps/installations/${app.id}" + suffix
+	return serverUrl + "/api/token/${state.access_token}/smartapps/installations/${app.id}" + suffix
+}
+
+def uninstalled()
+{
+	log.debug "In uninstalled"
+//removeWinkSubscriptions()
+//removeChildDevices(getChildDevices())
+//unschedule()
+}
+def createChildDevice(deviceFile, dni, name, label)
+{
+	log.debug "In createChildDevice"
+	try {
+		def existingDevice = getChildDevice(dni)
+        log.debug "existingDevice = ${existingDevice}"
+		if(!existingDevice) {
+			log.debug "Creating child"
+			def childDevice = addChildDevice(app.namespace, deviceFile, dni, null, [name: name, label: label, completedSetup: true])
+		} else {
+			log.debug "Device $dni already exists"
+		}
+	} 
+    catch (e) {
+		log.error "Error creating device: ${e}"
+	}
+}
+
+
+		//def clientid = ("98e54a1472bd52aab93c1c3aa3aaa133");
+		//def clientsecret = ("b0f62b8ac73cd6d011de32ce9c3f8dc8");
+		//def username = ("terryhonn@gmail.com");
+		//def password = ("May102014");
+def loginToQuirky() {
+	return dynamicPage(name: "loginToQuirky", title: "Connect to your Wink Hub",  nextPage:"listDevices", uninstall:true) {
+		//section("Log in to your Quirky account:") {
+		//	input "clientID", "text", value: "98e54a1472bd52aab93c1c3aa3aaa133" ,title: "Client ID", required: false, autoCorrect:false
+		//	input "clientSecret", "text",value: "b0f62b8ac73cd6d011de32ce9c3f8dc8" , title: "Secret", required: false, autoCorrect:false
+        //    input "userID", "text", value: "terryhonn@gmail.com" , title: "Username", required: false, autoCorrect:false
+		//	input "userPass", "password",value: "May102014" , title: "Password", required: false, autoCorrect:false
+		//}
+		section("To use Wink devices, SmartThings encrypts and securely stores your Quirky credentials. Click next to choose devices.") {}
+	}
+}
+
+def listAvailableLights() {
+	return dynamicPage(name: "listAvailableLights", title: "Lights on your Wink hub", uninstall:showUninstall) {
+    section { href url: buildRedirectUrl("receivedToken"), style:"embedded", required:false, title:"${getVendorName()} is now connected to SmartThings!", description:description }
+
+    }
+}
+
+def light_bulbEventHandler()
+{
+	log.debug "In light_bulb Event Handler..."
+	def json = request.JSON
+	def lights = json.light_bulbs
+    def html = """{"code":200,"message":"OK"}"""
+	render contentType: 'application/json', data: html
+	lights.each() {
+		def dni = getChildDevice(it.light_bulb_id)
+        if(!dni) //this is not a smartthings device cuz user did not pick it
+        	return
+		pollLightBulb(dni)   //sometimes events are stale, poll for all latest states
+	}
+}
+
+def pollLightBulb(childDevice)
+{
+	log.debug "In pollLightBulb"
+	apiGet("/light_bulbs/" + childDevice.device.deviceNetworkId) { response ->
+		def data = response.data.data
+		data.powered ? childDevice?.sendEvent(name:"switch",value:"on") :
+			childDevice?.sendEvent(name:"switch",value:"off")
+	}
+}
+def lb_on(childDevice)
+{
+	apiPut("/light_bulbs/" + childDevice.device.deviceNetworkId, [desired_state: [powered : true]]) { response ->
+		def data = response.data.data
+		log.debug "Sending 'on' to device"
+	}
+}
+
+def lb_off(childDevice)
+{
+	apiPut("/light_bulbs/" + childDevice.device.deviceNetworkId, [powered : false]) { response ->
+		def data = response.data.data
+		log.debug "Sending 'off' to device"
+	}
+}
+def on(childDevice)
+{
+	log.debug "start of on"
+    apiPut("/light_bulbs/" + childDevice.device.deviceNetworkId, [powered : true]) { response ->
+		def data = response.data.data
+		log.debug "Sending 'on' to device"
+	}
+}
+
+def off(childDevice)
+{
+	log.debug "start of off"
+	apiPut("/light_bulbs/" + childDevice.device.deviceNetworkId, [powered : false]) { response ->
+		def data = response.data.data
+		log.debug "Sending 'off' to device"
+	}
+}
+
+def listDevices()
+{
+	log.debug "In listDevices"
+	//login()
+	def devices = getDeviceList()
+	log.debug "Device List = ${devices}"
+    log.debug "Settings List = ${settings}"
+	dynamicPage(name: "listDevices", title: "Choose devices", install: true) {
+		section("Devices") {
+			input "devices", "enum", title: "Select Device(s)", required: false, multiple: true, options: devices
+		}
+	}
+}
+
+def getDeviceList(){
+	log.debug "In getDeviceList"
+	def deviceList = [:]
+	state.deviceDataArr = []
+	def pollParams = [
+    uri: "https://winkapi.quirky.com",
+    path: "/users/me/wink_devices",
+    //path: "/users/me/light_bulbs",
+    headers: ["Content-Type": "text/json", "Authorization": "Bearer ${state.access_token}"],
+    query: [format: 'json', body: jsonRequestBody]
+    ]
+    httpGet(pollParams) { resp ->
+    if (resp.data) {
+        if(resp.status == 200) {
+        resp.data.data.each() {
+        	for ( e in it ) {
+    			//log.debug e.key + " = " + e.value
+			}
+        	//log.debug it.model_name
+            
+			if ( it.light_bulb_id ) {
+            log.debug 'We got a light:' + it.name + ':' + it.light_bulb_id
+         		deviceList["${it.light_bulb_id}"] = it.name
+				state.deviceDataArr.push(['name'  : it.name,
+										 'id'     : it.light_bulb_id,
+										 'type'   : "light_bulb",
+										 'serial' : it.serial,
+										 'data'   : it,
+										 'subsSuff': "/light_bulbCallback",
+										 'subsPath': "/light_bulbs/${it.light_bulb_id}/subscriptions"
+				])
+            }
+           else
+           {
+           //log.debug 'also got:'+it.name+', but it is not a light'
+           
+           }
+          }
+    }
+        else {
+        log.error "polling children & got http status ${resp.status}"
+    }
+}
+}
+	return deviceList
+}
+def emptyHeaders = [:]
+      emptyHeaders."Content-Type" = "application/json"  
+
+def jsonObj = new JsonSlurper().parseText('{"client_id": "98e54a1472bd52aab93c1c3aa3aaa133", "client_secret": "b0f62b8ac73cd6d011de32ce9c3f8dc8", "username": "terryhonn@gmail.com",    "password": "May102014",    "grant_type": "password"}')
+
+def login(){
+		def clientid = ("98e54a1472bd52aab93c1c3aa3aaa133");
+		def clientsecret = ("b0f62b8ac73cd6d011de32ce9c3f8dc8");
+		def username = ("terryhonn@gmail.com");
+		def password = ("May102014");
+		def mystring = "{\"client_id\":\"" + clientid + "\",\"client_secret\":\"" + clientsecret + "\",\"username\":\"" + username + "\",\"password\":\"" + password + "\",\"grant_type\":\"password\"}";
+        //log.debug "String is " + mystring
+		def jsonObj = new JsonSlurper().parseText(mystring)
+        
+ 	def loginParams = [
+		uri: 'https://winkapi.quirky.com/',
+        //uri:  'https://private-e8cec-wink.apiary-mock.com/',
+		path: '/oauth2/token',
+		headers: ['Content-Type':'application/json'],
+		requestContentType: 'application/json',
+		body: ['client_id': clientid, 'client_secret': clientsecret, 'username': username, 'password' : password, 'grant_type':'password']
+	]
+
+	def result = [success:false]
+
+	httpPost(loginParams) { resp ->
+        if (resp.data.access_token){
+        		state.access_token = resp.data.access_token
+		log.debug "access_token obtained"
+        
+ 	      }
+          else
+          {
+          log.debug "access_token was null"
+          }
+        }
+	}
+	return result
+
+
+
+
+def trytoturnoff(bulb_id, access_token){
+	log.debug 'trying to turn off bulb ' + bulb_id
+     def values = ['desired_state': ['brightness': 0.7, 'powered': true ]]
+	httpPutJson([
+		uri : "https://winkapi.quirky.com",
+		path: "/light_bulbs/${bulb_id}",
+        body: values,
+		headers: [ "Authorization" : "Bearer ${state.access_token}"]
+		])
+		{response ->log.debug response.data}
+
+	}
+ 
+def listLights()
+{
+	log.debug "In listDevices"
+
+	//login()
+
+	def devices = getDeviceList()
+	log.debug "Device List = ${devices}"
+
+	dynamicPage(name: "listDevices", title: "Choose devices", install: true) {
+		section("Devices") {
+			input "devices", "enum", title: "Select Device(s)", required: false, multiple: true, options: devices
+		}
+	}
+}
+
+
+
+
+
+
+def pollLightbulb(childDevice)
+{
+	log.debug "In pollLightbulb"
+    log.debug "looking at " + childDevice.device.deviceNetworkId
+	apiGet("/light_bulbs/" + childDevice.device.deviceNetworkId) { response ->
+	//	def data = response.data.data
+    log.debug data
+	//	data.powered ? childDevice?.sendEvent(name:"switch",value:"on") :
+	//		childDevice?.sendEvent(name:"switch",value:"off")
+	}
+}
+
+
+def apiGet(String path, Closure callback)
+{
+	log.debug "accesstoken:${state.access_token}"
+	httpGet([
+		uri : apiUrl(),
+		path : path,
+		headers : [ 'Authorization' : 'Bearer ' + state.access_token ]
+	],)
+		{
+			response ->
+				callback.call(response)
+		}
+}
+
+def apiPut(String path, cmd, Closure callback)
+{
+	httpPutJson([
+		uri : apiUrl(),
+		path: path,
+		body: cmd,
+		headers : [ 'Authorization' : 'Bearer ' + state.access_token ]
+	],)
+
+		{
+			response ->
+				callback.call(response)
+		}
+}
+
+def receivedToken() {
+	log.debug "In receivedToken"
+
+	def html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta name="viewport" content="width=50%,height=50%,  user-scalable = yes">
+        <title>Withings Connection</title>
+        <style type="text/css">
+            @font-face {
+                font-family: 'Swiss 721 W01 Thin';
+                src: url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-thin-webfont.eot');
+                src: url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-thin-webfont.eot?#iefix') format('embedded-opentype'),
+                     url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-thin-webfont.woff') format('woff'),
+                     url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-thin-webfont.ttf') format('truetype'),
+                     url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-thin-webfont.svg#swis721_th_btthin') format('svg');
+                font-weight: normal;
+                font-style: normal;
+            }
+            @font-face {
+                font-family: 'Swiss 721 W01 Light';
+                src: url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-light-webfont.eot');
+                src: url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-light-webfont.eot?#iefix') format('embedded-opentype'),
+                     url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-light-webfont.woff') format('woff'),
+                     url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-light-webfont.ttf') format('truetype'),
+                     url('https://s3.amazonaws.com/smartapp-icons/Partner/fonts/swiss-721-light-webfont.svg#swis721_lt_btlight') format('svg');
+                font-weight: normal;
+                font-style: normal;
+            }
+            .container {
+                width: 560px;
+                padding: 40px;
+                /*background: #eee;*/
+                text-align: center;
+            }
+            img {
+                vertical-align: middle;
+            }
+            img:nth-child(2) {
+                margin: 0 30px;
+            }
+            p {
+                font-size: 2.2em;
+                font-family: 'Swiss 721 W01 Thin';
+                text-align: center;
+                color: #666666;
+                padding: 0 40px;
+                margin-bottom: 0;
+            }
+        /*
+            p:last-child {
+                margin-top: 0px;
+            }
+        */
+            span {
+                font-family: 'Swiss 721 W01 Light';
+            }
+        </style>
+        </head>
+        <body>
+            <div class="container">
+                <img src=""" + getVendorIcon() + """ alt="Vendor icon" />
+                <img src="https://s3.amazonaws.com/smartapp-icons/Partner/support/connected-device-icn%402x.png" alt="connected device icon" />
+                <img src="https://s3.amazonaws.com/smartapp-icons/Partner/support/st-logo%402x.png" alt="SmartThings logo" />
+                <p>Tap 'Done' to continue to Devices.</p>
+			</div>
+        </body>
+        </html>
+        """
+	render contentType: 'text/html', data: html
+}
+
+
+//private getClientId() 		{ "98e54a1472bd52aab93c1c3aa3aaa133" } // Dan Lieberman's
+//private getClientSecret() 	{ "b0f62b8ac73cd6d011de32ce9c3f8dc8" }
+
+//private getClientId() 		{ "98e54a1472bd52aab93c1c3aa3aaa133" }
+//private getClientSecret() 	{ "b0f62b8ac73cd6d011de32ce9c3f8dc8" }
+
+//private getServerUrl() 		{ "https://graph.api.smartthings.com" }
+
+def getLights(){
+	log.debug "In getLights"
+	def lightList = [:]
+	state.lightDataArr = []
+	def pollParams = [
+    uri: "https://winkapi.quirky.com",
+    path: "/users/me/light_bulbs",
+    headers: ["Content-Type": "text/json", "Authorization": "Bearer ${state.access_token}"],
+    query: [format: 'json', body: jsonRequestBody]
+    ]
+    httpGet(pollParams) { resp ->
+    if (resp.data) {
+    	//def json = JsonOutput.toJson(resp.data)
+    	//log.debug JsonOutput.prettyPrint(resp.data)
+        //log.debug "Response Status = ${resp.status}"
+        log.debug resp.data.data
+        if(resp.status == 200) {
+        resp.data.data.each() {
+        	for ( e in it ) {
+    			log.debug "key = ${e.key}, value = ${e.value}"
+			}
+        	log.debug it.model_name
+            
+			if ( it.light_bulb_id ) {
+            log.debug 'We got a light:' + it.name + ':' + it.light_bulb_id
+				deviceList["${it.light_bulb_id}"] = it.light_bulb_id
+				state.deviceDataArr.push(['name'    : it.name,
+					'id'      : it.light_bulb_id,
+					'type'    : "lightbulb",
+					'serial'  : it.serial,
+					'data'    : it,
+					'subsSuff': "/lightbulbCallback",
+					'subsPath': "/lightbulbs/${it.light_bulb_id}/subscriptions" ])
+            }
+           if (it.remote_id){
+           log.debug 'We got a remote:' + it.name + ':' + it.remote_id
+				deviceList["${it.remote_id}"] = it.remote_id
+				state.deviceDataArr.push(['name'    : it.name,
+					'id'      : it.remote_id,
+					'type'    : "remote",
+					'serial'  : it.serial,
+					'data'    : it,
+					'subsSuff': "/remoteCallback",
+					'subsPath': "/remotes/${it.remote_id}/subscriptions" ])
+           }
+           else
+           {
+           log.debug 'also got:'+it.name+', but it is not a light'
+           
+           }
+          }
+    }
+        else {
+        log.error "polling children & got http status ${resp.status}"
+    }
+}
+}
+	return deviceList
+}
