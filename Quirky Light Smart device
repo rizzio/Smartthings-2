@@ -1,0 +1,266 @@
+/**
+ *  OAuth Start
+ *
+ *  Copyright 2015 Terry Honn
+ *
+ */
+ 
+import java.text.DecimalFormat
+import groovy.json.JsonSlurper
+
+private apiUrl() 			{ "https://winkapi.quirky.com/" }
+private getVendorName() 	{ "Quirky Wink" }
+private getVendorAuthPath()	{ "https://winkapi.quirky.com/oauth2/authorize?" }
+private getVendorTokenPath(){ "https://winkapi.quirky.com/oauth2/token?" }
+private getQuirkyUserID()	{ "terryhonn@gmail.com" }
+private getQuirkyPassword()	{ "May102014" }
+private getClientId() 		{ "98e54a1472bd52aab93c1c3aa3aaa133" }
+private getClientSecret() 	{ "b0f62b8ac73cd6d011de32ce9c3f8dc8" }
+private getServerUrl() 		{ "https://graph.api.smartthings.com" }
+private getbulbid()			{ "126270"}
+metadata {
+definition(
+    name: "Basement Lamps", namespace: "TLH", author: "Terry Honn", oauth: false) {
+		capability "Refresh"
+		capability "Polling"
+        capability "Switch"
+        capability "Switch Level"
+	attribute "stepsize", "string"
+		command "levelUp"
+		command "levelDown"
+		command "getLevel"
+		command "dimmerOn"
+		command "dimmerOff"
+    }
+    preferences {
+		input "stepsize", "number", title: "Step Size", description: "Dimmer Step Size", defaultValue: 10, required: false, displayDuringSetup: true
+	}
+
+	tiles {
+		standardTile("switch", "device.switch", width: 2, height: 2, canChangeIcon: true) {
+			state "off", label: '${name}', action: "switch.on", icon: "st.switches.light.off", backgroundColor: "#ffffff"
+            state "on", label: '${name}', action: "switch.off", icon: "st.switches.light.on", backgroundColor: "#79b821"	
+		}
+        standardTile("refresh", "device.refresh", inactiveLabel: false, decoration: "flat") {
+			state "default", action:"refresh.refresh", icon:"st.secondary.refresh"
+		}
+                
+        controlTile("levelSliderControl", "device.level", "slider", height: 1, width: 2, inactiveLabel: false) {
+            state "level", action:"switch level.setLevel", unit:"", backgroundColor:"#ffe71e"
+        }
+        
+        valueTile("level", "device.level", inactiveLabel: false, decoration: "flat") {
+			state "level", label: '${currentValue}%', action:"refresh"
+		}
+
+        standardTile("lUp", "device.switch", inactiveLabel: false,decoration: "flat", canChangeIcon: false) {
+                        state "up", label:'', action:"levelUp",icon:"st.illuminance.illuminance.bright"
+        }
+        
+        standardTile("lDown", "device.switch", inactiveLabel: false,decoration: "flat", canChangeIcon: false) {
+                        state "down", label:'', action:"levelDown",icon:"st.illuminance.illuminance.light"
+        }
+	}
+	main(["switch"])
+    details(["switch","lUp","lDown", "levelSliderControl", "level" ])
+}
+
+
+def installed() {
+	log.debug "Installed with settings: ${settings}"
+	initialize()
+}
+
+def updated() {
+	log.debug "Updated with settings: ${settings}"
+	//unsubscribe()
+	initialize()
+    pollAllLightbulbs()
+}
+
+def initialize() {
+	if (!state.access_token){
+    	login()
+        log.debug "access token received: ${state.access_token}"
+        }
+    state.bulbid = getbulbid()
+    log.debug "bulbid is ${state.bulbid}"
+    if ( !settings.stepsize )
+    	state.stepsize = 10
+    else
+		state.stepsize = settings.stepsize
+    log.debug "Stepsize set at ${state.stepsize}"
+}
+
+
+def on()
+{
+    apiPut("/light_bulbs/" + state.bulbid, [desired_state: [powered : true]]) { response ->
+		def data = response.data.data
+    }
+    sendEvent(name:"switch",value:on)
+}
+
+def off()
+{
+	 apiPut("/light_bulbs/" + state.bulbid, [desired_state: [powered : false]]) { response ->
+		def data = response.data.data
+	}
+	sendEvent(name:"switch",value:off)
+}
+
+def levelUp(){
+	log.debug "in levelUp, start level is ${device.currentValue("level")}"
+    def step = state.stepsize as Integer ?: 10
+    def currLevel = device.currentValue("level") as Integer
+    def newLevel = (currLevel + step) as Integer
+    setLevel(newLevel)
+}
+
+def levelDown(){
+	log.debug "in levelDown, start level is ${device.currentValue("level")}"
+    def step = state.stepsize as Integer ?: 10
+    def currLevel = device.currentValue("level") as Integer
+    def newLevel = (currLevel - step) as Integer
+    setLevel(newLevel)
+}
+
+
+def setLevel(val)
+{
+    if (val < 0){
+    	val = 0
+    }
+    if( val > 99){
+    	val = 99
+    }
+    if (val == 0){ // I liked that 0 = off
+    	sendEvent(name:"level",value:val)
+    	off()
+    }
+    else
+    {
+    //device.currentValue("level") = val
+    sendEvent(name:"level",value:val)
+    sendEvent(name:"switch.setLevel",value:val)
+    def newlevel = val/100
+    def desired_state = [desired_state:[brightness:newlevel]]                          
+    def values = desired_state
+    apiPut("/light_bulbs/" + state.bulbid,values ) { response ->
+		def data = response.data.data
+        //log.debug data
+        }
+}	
+}
+
+def pollLightbulb(childDevice)
+{
+	log.debug "In pollLightBulb"
+	apiGet("/light_bulbs/" + childDevice.device.deviceNetworkId) { response ->
+		def data = response.data.data
+		data.powered ? childDevice?.sendEvent(name:"switch",value:"on") :
+			childDevice?.sendEvent(name:"switch",value:"off")
+	log.debug "Lightbulb is " + data.powered
+    }
+}
+
+
+
+
+def apiPut(String path, cmd, Closure callback)
+{
+	log.debug "In apiPut with path: $path and cmd: $cmd"
+	httpPutJson([
+		uri : apiUrl(),
+		path: path,
+		body: cmd,
+		headers : [ 'Authorization' : 'Bearer ' + state.access_token ]
+	])
+
+	{
+		response ->
+        def data = response.data.data
+   		//log.debug data   
+	}
+}
+
+
+def apiGet(String path, Closure callback)
+{
+	log.debug "apiGet path:${path}"
+	httpGet([
+		uri : apiUrl(),
+		path : path,
+		headers : [ 'Authorization' : 'Bearer ' + state.access_token ]
+	],)
+		{
+		response ->
+        def data = response.data.data
+   		log.debug data   
+
+		}
+}
+
+
+def pollAllLightbulbs()
+{
+	//def newDeviceList = settings['devices']
+    //newDeviceList.each {
+	//apiGet("/light_bulbs/" + newDeviceList.deviceNetworkId) { response ->
+	//	def data = response.data.data
+	//	log.debug "Lightbulb ${newDeviceList.deviceNetworkId} is " + data.powered
+    //}
+    //log.debug it.id
+    //}
+    //log.debug "settings have ${settings.devices.size()} devices"
+    settings.devices.each {
+		def deviceId = settings.devices
+        def countdevices = settings.devices.size()
+        log.debug "count of devices =" + countdevices
+        log.debug "deviceID-" + deviceId
+        apiGet("/light_bulbs/" + deviceId) { response ->
+        //deviceId.each{
+        //apiGet("/light_bulbs/" + deviceId) { response ->
+		//apiGet("/light_bulbs/" + it.deviceId) { response ->
+        //log.debug response.data.data.last_reading
+		log.debug "Lightbulb ${deviceId} is " + response.data.data.last_reading.powered
+    		}
+        def values = "[desired_state : [brightness: .2, powered: true]]"
+	 apiPut("/light_bulbs/" + deviceId,values) { response ->
+		def data = response.data.data
+   		log.debug data   
+        }
+        }
+}		
+
+//******************BELOW IS AUTH STUFF*****************************************
+def emptyHeaders = [:]
+      emptyHeaders."Content-Type" = "application/json" 
+      
+def login(){
+        def clientid = getClientId();
+        def clientsecret = getClientSecret();
+        def username = getQuirkyUserID();
+		def password = getQuirkyPassword();
+    	def loginParams = [
+			uri: 'https://winkapi.quirky.com/',
+			path: '/oauth2/token',
+			headers: ['Content-Type':'application/json'],
+			requestContentType: 'application/json',
+			body: ['client_id': clientid, 'client_secret': clientsecret, 'username': username, 'password' : password, 'grant_type':'password']
+			]
+
+		def result = [success:false]
+
+		httpPost(loginParams) { resp ->
+        	if (resp.data.access_token){
+        		state.access_token = resp.data.access_token
+				log.debug "access_token obtained: ${state.access_token}"
+ 	      		}
+          	else
+          		{
+          		log.debug "access_token was null"
+          		}
+        	}
+	}
+	return result
